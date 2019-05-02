@@ -1,7 +1,9 @@
 #![feature(proc_macro_hygiene, decl_macro)]
 
-#[macro_use] extern crate rocket;
-#[macro_use] extern crate rocket_contrib;
+#[macro_use]
+extern crate rocket;
+#[macro_use]
+extern crate rocket_contrib;
 
 use rocket_contrib::databases::redis;
 use rocket_contrib::databases::redis::Commands;
@@ -19,7 +21,7 @@ fn get_key(conn: DbConn, key: String) -> String {
     let value: Result<String, redis::RedisError> = conn.get(key);
     match value {
         Ok(v) => format!("{}\n", v),
-        Err(e) => format!("Key does not exist: {}\n", e)
+        Err(e) => format!("Key does not exist: {}\n", e),
     }
 }
 
