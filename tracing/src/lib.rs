@@ -4,7 +4,6 @@ use aes_soft::Aes128;
 use redis::Commands;
 use sha3::{Digest, Sha3_256};
 
-#[derive(Debug)]
 pub struct TraceMetadata {
     ptr: [u8; 16],
 }
@@ -18,29 +17,43 @@ pub struct RecTraceTag {
     addr: [u8; 16],
 }
 
+fn prf(k: &[u8; 16], x: &[u8]) -> [u8; 16] {
+    let mut y: [u8; 16] = Default::default();
+    y.copy_from_slice(&Sha3_256::digest(&[k, x].concat()).as_slice()[0..16]);
+    y
+}
+
+fn encipher(k: &[u8; 16], x: &[u8; 16]) -> [u8; 16] {
+    let mut y: [u8; 16] = Default::default();
+    let cipher = Aes128::new(GenericArray::from_slice(k));
+    let mut block = GenericArray::clone_from_slice(x);
+    cipher.encrypt_block(&mut block);
+    y.copy_from_slice(&block.as_slice());
+    y
+}
+
+fn decipher(k: &[u8; 16], y: &[u8; 16]) -> [u8; 16] {
+    let mut x: [u8; 16] = Default::default();
+    let cipher = Aes128::new(GenericArray::from_slice(k));
+    let mut block = GenericArray::clone_from_slice(y);
+    cipher.decrypt_block(&mut block);
+    x.copy_from_slice(&block.as_slice());
+    x
+}
+
 pub fn new_message(_m: &[u8]) -> TraceMetadata {
     //TraceMetadata{ ptr: [0; 16] }
     TraceMetadata{ ptr: rand::random::<[u8; 16]>() }
 }
 
 pub fn generate_tag(k: &[u8; 16], m: &[u8], md: &TraceMetadata) -> SenderTraceTag {
-    let mut addr: [u8; 16] = Default::default();
-    let mut ct: [u8; 16] = Default::default();
-
-    addr.copy_from_slice(&Sha3_256::digest(&[k, m].concat()).as_slice()[0..16]);
-
-    let mut block = GenericArray::clone_from_slice(&md.ptr);
-    let cipher = Aes128::new(GenericArray::from_slice(k));
-    cipher.encrypt_block(&mut block);
-    ct.copy_from_slice(&block.as_slice());
-
+    let addr = prf(k, m);
+    let ct = encipher(k, &md.ptr);
     SenderTraceTag{ addr: addr, ct: ct }
 }
 
 pub fn verify_tag(k: &[u8; 16], m: &[u8], ttr: &RecTraceTag) -> Option<TraceMetadata> {
-    let mut addr: [u8; 16] = Default::default();
-    addr.copy_from_slice(&Sha3_256::digest(&[k, m].concat()).as_slice()[0..16]);
-
+    let addr = prf(k, m);
     if addr != ttr.addr {
         None
     } else {
@@ -62,23 +75,21 @@ pub fn svr_process(conn: &redis::Connection, tts: &SenderTraceTag, sid: u32, rid
 
 pub fn svr_trace(conn: &redis::Connection, m: &[u8], md: &TraceMetadata, uid: u32) -> Vec<u32> {
     let mut path = vec![uid];
-    let mut ptr = GenericArray::clone_from_slice(&md.ptr);
-    let mut addr: [u8; 16] = Default::default();
-    addr.copy_from_slice(&Sha3_256::digest(&[&md.ptr, m].concat()).as_slice()[0..16]);
+    let mut ptr = md.ptr.clone();
+    let mut addr = prf(&md.ptr, m);
+    let mut ct: [u8; 16] = Default::default();
 
     while conn.exists(&addr).unwrap() {
-        let mut ct : Vec<u8> = conn.hget(&addr, "ct").unwrap();
+        let ctvec: Vec<u8> = conn.hget(&addr, "ct").unwrap();
+        ct.copy_from_slice(&ctvec);
         let rid : u32 = conn.hget(&addr, "rid").unwrap();
         if *path.last().unwrap() != rid {
             break
         }
         path.push(conn.hget(&addr, "sid").unwrap());
 
-        let mut block = GenericArray::from_mut_slice(&mut ct);
-        let cipher = Aes128::new(&ptr);
-        cipher.decrypt_block(&mut block);
-        ptr = block.clone();
-        addr.copy_from_slice(&Sha3_256::digest(&[ptr.as_slice(), m].concat()).as_slice()[0..16]);
+        ptr = decipher(&ptr, &ct);
+        addr = prf(&ptr, m);
     };
     path
 }
