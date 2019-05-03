@@ -2,6 +2,7 @@ use super::*;
 use log::info;
 use redis::Commands;
 
+#[derive(Clone)]
 pub struct TraceMetadata {
     bptr: [u8; 16],
     gk: [u8; 16],
@@ -22,6 +23,7 @@ pub struct RecTraceTag {
     ks_fgk: [u8; 16],
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Tree {
     uid: u32,
     children: Vec<Tree>,
@@ -113,7 +115,8 @@ pub fn svr_trace(conn: &redis::Connection, m: &[u8], md: &TraceMetadata, uid: u3
 
         // Wellformedness check of forward generator key
         let ks_sender = decipher(&bptr, &ct_fgk);
-        if gk != hash(&[&ks_sender[..], &ks_platform[..]].concat()) {
+        let fgk = hash(&[&ks_sender[..], &ks_platform[..]].concat());
+        if gk != fgk {
             info!(target: "root_traceback", "Malformed forward generator key");
             break;
         }
@@ -137,9 +140,12 @@ pub fn svr_trace(conn: &redis::Connection, m: &[u8], md: &TraceMetadata, uid: u3
             };
             ctr = ctr + 1;
         };
-        if ptr_valid {
+        if !ptr_valid {
             info!(target: "root_traceback", "Malformed generator key usage");
-            break;
+            return Tree {
+                uid: sid,
+                children: vec![svr_build_tree(conn, m, &fgk, rid)],
+            };
         }
 
         // Next address
@@ -197,4 +203,206 @@ fn svr_read_state(
     let sid: u32 = conn.hget(addr, "sid").unwrap();
     let rid: u32 = conn.hget(addr, "rid").unwrap();
     (ct_bptr, ct_gk, ct_fgk, ks_platform, sid, rid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_logger() {
+        //env_logger::init();
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+
+    #[test]
+    fn process_tag_verifies() {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let conn = client.get_connection().unwrap();
+
+        let m = "Plaintext";
+        let k = rand::random::<[u8; 16]>();
+        let tmd0 = new_message(m.as_bytes());
+        let tts = generate_tag(&k, m.as_bytes(), &tmd0, 0);
+        let ttr = svr_process(&conn, &tts, 0, 1).unwrap();
+        let tmd1 = verify_tag(&k, m.as_bytes(), &ttr).unwrap();
+        assert_eq!(prf(&tmd0.gk, &0u32.to_be_bytes()), tmd1.bptr);
+
+        let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
+    }
+
+    fn test_send(
+        conn: &redis::Connection,
+        m: &[u8],
+        tmd: &TraceMetadata,
+        ctr: u32,
+        sid: u32,
+        rid: u32,
+    ) -> TraceMetadata {
+        let k = rand::random::<[u8; 16]>();
+        let tts = generate_tag(&k, m, &tmd, ctr);
+        let ttr = svr_process(conn, &tts, sid, rid).unwrap();
+        verify_tag(&k, m, &ttr).unwrap()
+    }
+
+    #[test]
+    fn trace_simple_tree() {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let conn = client.get_connection().unwrap();
+
+        let m = "Plaintext";
+        let tmd0 = new_message(m.as_bytes());
+        let tmd01 = test_send(&conn, m.as_bytes(), &tmd0, 0, 0, 1);
+        let tmd02 = test_send(&conn, m.as_bytes(), &tmd0, 1, 0, 2);
+
+        let tree0 = svr_trace(&conn, m.as_bytes(), &tmd0, 0);
+        let tree1 = svr_trace(&conn, m.as_bytes(), &tmd01, 1);
+        let tree2 = svr_trace(&conn, m.as_bytes(), &tmd02, 2);
+
+        let tree = Tree {
+            uid: 0,
+            children: vec![
+                Tree {
+                    uid: 1,
+                    children: vec![],
+                },
+                Tree {
+                    uid: 2,
+                    children: vec![],
+                },
+            ],
+        };
+
+        assert_eq!(tree, tree0);
+        assert_eq!(tree, tree1);
+        assert_eq!(tree, tree2);
+
+        let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
+    }
+
+    #[test]
+    fn trace_message_switch() {
+        init_logger();
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let conn = client.get_connection().unwrap();
+
+        let m = "Plaintext";
+        let m2 = "Different Plaintext";
+        let tmd0 = new_message(m.as_bytes());
+        let tmd01 = test_send(&conn, m.as_bytes(), &tmd0, 0, 0, 1);
+        let tmd12 = test_send(&conn, m.as_bytes(), &tmd01, 0, 1, 2);
+        let tmd13 = test_send(&conn, m2.as_bytes(), &tmd01, 0, 1, 3);
+
+        let tree2 = svr_trace(&conn, m.as_bytes(), &tmd12, 2);
+        let tree3 = svr_trace(&conn, m2.as_bytes(), &tmd13, 3);
+
+        let real_tree2 = Tree {
+            uid: 0,
+            children: vec![Tree {
+                uid: 1,
+                children: vec![Tree {
+                    uid: 2,
+                    children: vec![],
+                }],
+            }],
+        };
+
+        let real_tree3 = Tree {
+            uid: 1,
+            children: vec![Tree {
+                uid: 3,
+                children: vec![],
+            }],
+        };
+
+        assert_eq!(tree2, real_tree2);
+        assert_eq!(tree3, real_tree3);
+
+        let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
+    }
+
+    #[test]
+    fn trace_counter_skip() {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let conn = client.get_connection().unwrap();
+
+        let m = "Plaintext";
+        let tmd0 = new_message(m.as_bytes());
+        let tmd01 = test_send(&conn, m.as_bytes(), &tmd0, 0, 0, 1);
+        let tmd12 = test_send(&conn, m.as_bytes(), &tmd01, 0, 1, 2);
+        let tmd13 = test_send(&conn, m.as_bytes(), &tmd01, 2, 1, 3);
+
+        let tree2 = svr_trace(&conn, m.as_bytes(), &tmd12, 2);
+        let tree3 = svr_trace(&conn, m.as_bytes(), &tmd13, 3);
+
+        let real_tree2 = Tree {
+            uid: 0,
+            children: vec![Tree {
+                uid: 1,
+                children: vec![Tree {
+                    uid: 2,
+                    children: vec![],
+                }],
+            }],
+        };
+
+        let real_tree3 = Tree {
+            uid: 1,
+            children: vec![Tree {
+                uid: 3,
+                children: vec![],
+            }],
+        };
+
+        assert_eq!(tree2, real_tree2);
+        assert_eq!(tree3, real_tree3);
+
+        let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
+    }
+
+    #[test]
+    fn trace_malformed_forward_generator() {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let conn = client.get_connection().unwrap();
+
+        let m = "Plaintext";
+        let tmd0 = new_message(m.as_bytes());
+        let tmd01 = test_send(&conn, m.as_bytes(), &tmd0, 0, 0, 1);
+        let mut tmd01_mal = tmd01.clone();
+        tmd01_mal.gk = [0; 16];
+        let tmd12 = test_send(&conn, m.as_bytes(), &tmd01_mal, 0, 1, 2);
+        let tmd13 = test_send(&conn, m.as_bytes(), &tmd01_mal, 1, 1, 3);
+
+        let tree0 = svr_trace(&conn, m.as_bytes(), &tmd0, 0);
+        let tree2 = svr_trace(&conn, m.as_bytes(), &tmd12, 2);
+        let tree3 = svr_trace(&conn, m.as_bytes(), &tmd13, 3);
+
+        let real_tree0 = Tree {
+            uid: 0,
+            children: vec![Tree {
+                uid: 1,
+                children: vec![],
+            }],
+        };
+
+        let real_tree23 = Tree {
+            uid: 1,
+            children: vec![
+                Tree {
+                    uid: 2,
+                    children: vec![],
+                },
+                Tree {
+                    uid: 3,
+                    children: vec![],
+                },
+            ],
+        };
+
+        assert_eq!(tree0, real_tree0);
+        assert_eq!(tree2, real_tree23);
+        assert_eq!(tree3, real_tree23);
+
+        let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
+    }
+
 }
