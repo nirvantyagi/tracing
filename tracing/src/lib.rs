@@ -4,6 +4,13 @@ use aes_soft::Aes128;
 use sha3::{Digest, Sha3_256};
 
 pub mod path;
+pub mod tree;
+
+fn hash(x: &[u8]) -> [u8; 16] {
+    let mut y: [u8; 16] = Default::default();
+    y.copy_from_slice(&Sha3_256::digest(x).as_slice()[0..16]);
+    y
+}
 
 fn prf(k: &[u8; 16], x: &[u8]) -> [u8; 16] {
     let mut y: [u8; 16] = Default::default();
