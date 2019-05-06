@@ -209,9 +209,39 @@ fn svr_read_state(
 mod tests {
     use super::*;
 
+    extern crate test;
+    use test::Bencher;
+
     fn init_logger() {
         //env_logger::init();
         let _ = env_logger::builder().is_test(true).try_init();
+    }
+
+    fn mock_send(
+        conn: &redis::Connection,
+        m: &[u8],
+        tmd: &TraceMetadata,
+        ctr: u32,
+        sid: u32,
+        rid: u32,
+    ) -> TraceMetadata {
+        let k = rand::random::<[u8; 16]>();
+        let tts = generate_tag(&k, m, &tmd, ctr);
+        let ttr = svr_process(conn, &tts, sid, rid).unwrap();
+        verify_tag(&k, m, &ttr).unwrap()
+    }
+
+    fn mock_tree(conn: &redis::Connection, m: &[u8], tmd: &TraceMetadata, depth: u32, span: u32, uid: u32) {
+        match depth {
+            0 => (),
+            _ => {
+                for i in 0..span {
+                    let rid = rand::random::<u32>();
+                    let tmd_out = mock_send(conn, m, tmd, i, uid, rid);
+                    let _ = mock_tree(conn, m, &tmd_out, depth - 1, span, rid);
+                }
+            }
+        }
     }
 
     #[test]
@@ -230,20 +260,6 @@ mod tests {
         let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
     }
 
-    fn test_send(
-        conn: &redis::Connection,
-        m: &[u8],
-        tmd: &TraceMetadata,
-        ctr: u32,
-        sid: u32,
-        rid: u32,
-    ) -> TraceMetadata {
-        let k = rand::random::<[u8; 16]>();
-        let tts = generate_tag(&k, m, &tmd, ctr);
-        let ttr = svr_process(conn, &tts, sid, rid).unwrap();
-        verify_tag(&k, m, &ttr).unwrap()
-    }
-
     #[test]
     fn trace_simple_tree() {
         let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
@@ -251,8 +267,8 @@ mod tests {
 
         let m = "Plaintext";
         let tmd0 = new_message(m.as_bytes());
-        let tmd01 = test_send(&conn, m.as_bytes(), &tmd0, 0, 0, 1);
-        let tmd02 = test_send(&conn, m.as_bytes(), &tmd0, 1, 0, 2);
+        let tmd01 = mock_send(&conn, m.as_bytes(), &tmd0, 0, 0, 1);
+        let tmd02 = mock_send(&conn, m.as_bytes(), &tmd0, 1, 0, 2);
 
         let tree0 = svr_trace(&conn, m.as_bytes(), &tmd0, 0);
         let tree1 = svr_trace(&conn, m.as_bytes(), &tmd01, 1);
@@ -288,9 +304,9 @@ mod tests {
         let m = "Plaintext";
         let m2 = "Different Plaintext";
         let tmd0 = new_message(m.as_bytes());
-        let tmd01 = test_send(&conn, m.as_bytes(), &tmd0, 0, 0, 1);
-        let tmd12 = test_send(&conn, m.as_bytes(), &tmd01, 0, 1, 2);
-        let tmd13 = test_send(&conn, m2.as_bytes(), &tmd01, 0, 1, 3);
+        let tmd01 = mock_send(&conn, m.as_bytes(), &tmd0, 0, 0, 1);
+        let tmd12 = mock_send(&conn, m.as_bytes(), &tmd01, 0, 1, 2);
+        let tmd13 = mock_send(&conn, m2.as_bytes(), &tmd01, 0, 1, 3);
 
         let tree2 = svr_trace(&conn, m.as_bytes(), &tmd12, 2);
         let tree3 = svr_trace(&conn, m2.as_bytes(), &tmd13, 3);
@@ -327,9 +343,9 @@ mod tests {
 
         let m = "Plaintext";
         let tmd0 = new_message(m.as_bytes());
-        let tmd01 = test_send(&conn, m.as_bytes(), &tmd0, 0, 0, 1);
-        let tmd12 = test_send(&conn, m.as_bytes(), &tmd01, 0, 1, 2);
-        let tmd13 = test_send(&conn, m.as_bytes(), &tmd01, 2, 1, 3);
+        let tmd01 = mock_send(&conn, m.as_bytes(), &tmd0, 0, 0, 1);
+        let tmd12 = mock_send(&conn, m.as_bytes(), &tmd01, 0, 1, 2);
+        let tmd13 = mock_send(&conn, m.as_bytes(), &tmd01, 2, 1, 3);
 
         let tree2 = svr_trace(&conn, m.as_bytes(), &tmd12, 2);
         let tree3 = svr_trace(&conn, m.as_bytes(), &tmd13, 3);
@@ -366,11 +382,11 @@ mod tests {
 
         let m = "Plaintext";
         let tmd0 = new_message(m.as_bytes());
-        let tmd01 = test_send(&conn, m.as_bytes(), &tmd0, 0, 0, 1);
+        let tmd01 = mock_send(&conn, m.as_bytes(), &tmd0, 0, 0, 1);
         let mut tmd01_mal = tmd01.clone();
         tmd01_mal.gk = [0; 16];
-        let tmd12 = test_send(&conn, m.as_bytes(), &tmd01_mal, 0, 1, 2);
-        let tmd13 = test_send(&conn, m.as_bytes(), &tmd01_mal, 1, 1, 3);
+        let tmd12 = mock_send(&conn, m.as_bytes(), &tmd01_mal, 0, 1, 2);
+        let tmd13 = mock_send(&conn, m.as_bytes(), &tmd01_mal, 1, 1, 3);
 
         let tree0 = svr_trace(&conn, m.as_bytes(), &tmd0, 0);
         let tree2 = svr_trace(&conn, m.as_bytes(), &tmd12, 2);
@@ -402,6 +418,63 @@ mod tests {
         assert_eq!(tree2, real_tree23);
         assert_eq!(tree3, real_tree23);
 
+        let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
+    }
+
+    #[bench]
+    fn bench_tag_gen(b: &mut Bencher) {
+        let m = [0u8; 256];
+        let k = rand::random::<[u8; 16]>();
+        let md = TraceMetadata {
+            bptr: rand::random::<[u8; 16]>(),
+            gk: rand::random::<[u8; 16]>(),
+        };
+        b.iter(|| generate_tag(&k, &m, &md, 0));
+    }
+
+    #[bench]
+    fn bench_tag_receive(b: &mut Bencher) {
+        let m = [0u8; 256];
+        let k = rand::random::<[u8; 16]>();
+        let ptr = rand::random::<[u8; 16]>();
+        let ttr = RecTraceTag {
+            addr: prf(&k, &m),
+            ct_ptr: encipher(&k, &ptr),
+            ct_fgk: rand::random::<[u8; 16]>(),
+            ks_fgk: rand::random::<[u8; 16]>(),
+        };
+        b.iter(|| verify_tag(&k, &m, &ttr));
+    }
+
+    #[bench]
+    fn bench_tag_process(b: &mut Bencher) {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let conn = client.get_connection().unwrap();
+        let sid = rand::random::<u32>();
+        let rid = rand::random::<u32>();
+        let tts = SenderTraceTag {
+            addr: rand::random::<[u8; 16]>(),
+            ct_ptr: rand::random::<[u8; 16]>(),
+            ct_bptr: rand::random::<[u8; 16]>(),
+            ct_gk: rand::random::<[u8; 16]>(),
+            ct_fgk: rand::random::<[u8; 16]>(),
+        };
+        b.iter(|| {
+            svr_process(&conn, &tts, sid, rid);
+            let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
+        });
+    }
+
+    #[bench]
+    fn bench_trace_tree(b: &mut Bencher) {
+        let depth = 4;
+        let span = 3;
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let conn = client.get_connection().unwrap();
+        let m = [0u8; 256];
+        let tmd = new_message(&m);
+        mock_tree(&conn, &m, &tmd, depth, span, 0);
+        b.iter(|| svr_trace(&conn, &m, &tmd, 0));
         let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
     }
 

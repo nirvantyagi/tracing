@@ -79,6 +79,34 @@ pub fn svr_trace(conn: &redis::Connection, m: &[u8], md: &TraceMetadata, uid: u3
 mod tests {
     use super::*;
 
+    extern crate test;
+    use test::Bencher;
+
+    fn mock_send(
+        conn: &redis::Connection,
+        m: &[u8],
+        tmd: &TraceMetadata,
+        sid: u32,
+        rid: u32,
+    ) -> TraceMetadata {
+        let k = rand::random::<[u8; 16]>();
+        let tts = generate_tag(&k, m, &tmd);
+        let ttr = svr_process(conn, &tts, sid, rid).unwrap();
+        verify_tag(&k, m, &ttr).unwrap()
+    }
+
+    fn mock_path(
+        conn: &redis::Connection,
+        m: &[u8],
+        mut tmd: TraceMetadata,
+        len: u32,
+    ) -> TraceMetadata {
+        for i in 0..len {
+            tmd = mock_send(conn, m, &tmd, i, i + 1);
+        }
+        tmd
+    }
+
     #[test]
     fn tag_verifies() {
         let m = "Plaintext";
@@ -150,19 +178,6 @@ mod tests {
         let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
     }
 
-    fn test_send(
-        conn: &redis::Connection,
-        m: &[u8],
-        tmd: &TraceMetadata,
-        sid: u32,
-        rid: u32,
-    ) -> TraceMetadata {
-        let k = rand::random::<[u8; 16]>();
-        let tts = generate_tag(&k, m, &tmd);
-        let ttr = svr_process(conn, &tts, sid, rid).unwrap();
-        verify_tag(&k, m, &ttr).unwrap()
-    }
-
     #[test]
     fn trace_simple_path() {
         let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
@@ -170,8 +185,8 @@ mod tests {
 
         let m = "Plaintext";
         let tmd0 = new_message(m.as_bytes());
-        let tmd1 = test_send(&conn, m.as_bytes(), &tmd0, 0, 1);
-        let tmd2 = test_send(&conn, m.as_bytes(), &tmd1, 1, 2);
+        let tmd1 = mock_send(&conn, m.as_bytes(), &tmd0, 0, 1);
+        let tmd2 = mock_send(&conn, m.as_bytes(), &tmd1, 1, 2);
 
         let path = svr_trace(&conn, m.as_bytes(), &tmd2, 2);
         assert_eq!(vec![2, 1, 0], path);
@@ -194,8 +209,8 @@ mod tests {
         let m = "Plaintext";
         let m2 = "Different Plaintext";
         let tmd0 = new_message(m.as_bytes());
-        let tmd1 = test_send(&conn, m.as_bytes(), &tmd0, 0, 1);
-        let tmd2 = test_send(&conn, m2.as_bytes(), &tmd1, 1, 2);
+        let tmd1 = mock_send(&conn, m.as_bytes(), &tmd0, 0, 1);
+        let tmd2 = mock_send(&conn, m2.as_bytes(), &tmd1, 1, 2);
 
         let path = svr_trace(&conn, m2.as_bytes(), &tmd2, 2);
         assert_eq!(vec![2, 1], path);
@@ -210,12 +225,57 @@ mod tests {
 
         let m = "Plaintext";
         let tmd0 = new_message(m.as_bytes());
-        let tmd1 = test_send(&conn, m.as_bytes(), &tmd0, 0, 1);
-        let tmd2 = test_send(&conn, m.as_bytes(), &tmd1, 3, 2);
+        let tmd1 = mock_send(&conn, m.as_bytes(), &tmd0, 0, 1);
+        let tmd2 = mock_send(&conn, m.as_bytes(), &tmd1, 3, 2);
 
         let path = svr_trace(&conn, m.as_bytes(), &tmd2, 2);
         assert_eq!(vec![2, 3], path);
 
+        let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
+    }
+
+    #[bench]
+    fn bench_tag_gen(b: &mut Bencher) {
+        let m = [0u8; 256];
+        let k = rand::random::<[u8; 16]>();
+        let md = TraceMetadata {
+            ptr: rand::random::<[u8; 16]>(),
+        };
+        b.iter(|| generate_tag(&k, &m, &md));
+    }
+
+    #[bench]
+    fn bench_tag_receive(b: &mut Bencher) {
+        let m = [0u8; 256];
+        let k = rand::random::<[u8; 16]>();
+        let ttr = RecTraceTag { addr: prf(&k, &m) };
+        b.iter(|| verify_tag(&k, &m, &ttr));
+    }
+
+    #[bench]
+    fn bench_tag_process(b: &mut Bencher) {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let conn = client.get_connection().unwrap();
+        let sid = rand::random::<u32>();
+        let rid = rand::random::<u32>();
+        let tts = SenderTraceTag {
+            addr: rand::random::<[u8; 16]>(),
+            ct: rand::random::<[u8; 16]>(),
+        };
+        b.iter(|| {
+            svr_process(&conn, &tts, sid, rid);
+            let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
+        });
+    }
+
+    #[bench]
+    fn bench_trace_path(b: &mut Bencher) {
+        let len = 10;
+        let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
+        let conn = client.get_connection().unwrap();
+        let m = [0u8; 256];
+        let tmd = mock_path(&conn, &m, new_message(&m), len);
+        b.iter(|| svr_trace(&conn, &m, &tmd, len));
         let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
     }
 
