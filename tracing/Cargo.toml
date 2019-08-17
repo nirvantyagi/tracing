@@ -10,6 +10,7 @@ log = "0.4.6"
 rand = "0.6.5"
 redis = "0.10.0"
 sha3 = "0.8.2"
+hmac = "0.7.1"
 
 [dev-dependencies]
 env_logger = "0.6.1"

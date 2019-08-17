@@ -6,12 +6,12 @@ pub struct TraceMetadata {
 }
 
 pub struct SenderTraceTag {
-    addr: [u8; 16],
+    addr: [u8; 32],
     ct: [u8; 16],
 }
 
 pub struct RecTraceTag {
-    addr: [u8; 16],
+    addr: [u8; 32],
 }
 
 pub fn new_message(_m: &[u8]) -> TraceMetadata {
@@ -19,13 +19,13 @@ pub fn new_message(_m: &[u8]) -> TraceMetadata {
 }
 
 pub fn generate_tag(k: &[u8; 16], m: &[u8], md: &TraceMetadata) -> SenderTraceTag {
-    let addr = prf(k, m);
+    let addr = crprf(k, m);
     let ct = encipher(k, &md.ptr);
     SenderTraceTag { addr: addr, ct: ct }
 }
 
 pub fn verify_tag(k: &[u8; 16], m: &[u8], ttr: &RecTraceTag) -> Option<TraceMetadata> {
-    let addr = prf(k, m);
+    let addr = crprf(k, m);
     if addr != ttr.addr {
         None
     } else {
@@ -57,7 +57,7 @@ pub fn svr_process(
 pub fn svr_trace(conn: &redis::Connection, m: &[u8], md: &TraceMetadata, uid: u32) -> Vec<u32> {
     let mut path = vec![uid];
     let mut ptr = md.ptr.clone();
-    let mut addr = prf(&md.ptr, m);
+    let mut addr = crprf(&md.ptr, m);
     let mut ct: [u8; 16] = Default::default();
 
     while conn.exists(&addr).unwrap() {
@@ -70,7 +70,7 @@ pub fn svr_trace(conn: &redis::Connection, m: &[u8], md: &TraceMetadata, uid: u3
         path.push(conn.hget(&addr, "sid").unwrap());
 
         ptr = decipher(&ptr, &ct);
-        addr = prf(&ptr, m);
+        addr = crprf(&ptr, m);
     }
     path
 }
@@ -156,7 +156,7 @@ mod tests {
     fn process_duplicate_address() {
         let client = redis::Client::open("redis://127.0.0.1:6379/").unwrap();
         let conn = client.get_connection().unwrap();
-        let addr = rand::random::<[u8; 16]>();
+        let addr = rand::random::<[u8; 32]>();
 
         let tts1 = SenderTraceTag {
             addr: addr.clone(),
@@ -248,7 +248,7 @@ mod tests {
     fn bench_tag_receive(b: &mut Bencher) {
         let m = [0u8; 256];
         let k = rand::random::<[u8; 16]>();
-        let ttr = RecTraceTag { addr: prf(&k, &m) };
+        let ttr = RecTraceTag { addr: crprf(&k, &m) };
         b.iter(|| verify_tag(&k, &m, &ttr));
     }
 
@@ -259,7 +259,7 @@ mod tests {
         let sid = rand::random::<u32>();
         let rid = rand::random::<u32>();
         let tts = SenderTraceTag {
-            addr: rand::random::<[u8; 16]>(),
+            addr: rand::random::<[u8; 32]>(),
             ct: rand::random::<[u8; 16]>(),
         };
         b.iter(|| {

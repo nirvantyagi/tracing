@@ -3,6 +3,7 @@
 use aes_soft::block_cipher_trait::generic_array::GenericArray;
 use aes_soft::block_cipher_trait::BlockCipher;
 use aes_soft::Aes128;
+use hmac::{Hmac, Mac};
 use sha3::{Digest, Sha3_256};
 
 pub mod path;
@@ -17,6 +18,14 @@ fn hash(x: &[u8]) -> [u8; 16] {
 fn prf(k: &[u8; 16], x: &[u8]) -> [u8; 16] {
     let mut y: [u8; 16] = Default::default();
     y.copy_from_slice(&Sha3_256::digest(&[k, x].concat()).as_slice()[0..16]);
+    y
+}
+
+fn crprf(k: &[u8; 16], x: &[u8]) -> [u8; 32] {
+    let mut y: [u8; 32] = Default::default();
+    let mut mac = Hmac::<Sha3_256>::new_varkey(k).unwrap();
+    mac.input(x);
+    y.copy_from_slice(&mac.result().code().as_slice());
     y
 }
 
