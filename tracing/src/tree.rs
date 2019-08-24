@@ -231,7 +231,14 @@ mod tests {
         verify_tag(&k, m, &ttr).unwrap()
     }
 
-    fn mock_tree(conn: &redis::Connection, m: &[u8], tmd: &TraceMetadata, depth: u32, span: u32, uid: u32) {
+    fn mock_tree(
+        conn: &redis::Connection,
+        m: &[u8],
+        tmd: &TraceMetadata,
+        depth: u32,
+        span: u32,
+        uid: u32,
+    ) {
         match depth {
             0 => (),
             _ => {
@@ -477,5 +484,4 @@ mod tests {
         b.iter(|| svr_trace(&conn, &m, &tmd, 0));
         let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
     }
-
 }

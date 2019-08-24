@@ -5,29 +5,54 @@ extern crate rocket;
 #[macro_use]
 extern crate rocket_contrib;
 
+use rocket::response::status::BadRequest;
 use rocket_contrib::databases::redis;
-use rocket_contrib::databases::redis::Commands;
+use rocket_contrib::json::Json;
+use serde::{Deserialize, Serialize};
+
+use tracing::path::*;
 
 #[database("redis")]
 struct DbConn(redis::Connection);
 
-#[get("/")]
-fn index() -> &'static str {
-    "Hello, world!\n"
+#[derive(Serialize, Deserialize)]
+struct ProcessRequestData {
+    stag: SenderTraceTag,
+    sid: u32,
+    rid: u32,
 }
 
-#[get("/<key>")]
-fn get_key(conn: DbConn, key: String) -> String {
-    let value: Result<String, redis::RedisError> = conn.get(key);
-    match value {
-        Ok(v) => format!("{}\n", v),
-        Err(e) => format!("Key does not exist: {}\n", e),
+#[derive(Serialize, Deserialize)]
+struct TraceRequestData {
+    m: String,
+    tmd: TraceMetadata,
+    uid: u32,
+}
+
+#[post("/process", format = "json", data = "<data>")]
+fn process(
+    conn: DbConn,
+    data: Json<ProcessRequestData>,
+) -> Result<Json<RecTraceTag>, BadRequest<String>> {
+    let data = data.into_inner();
+    let rec_tag = svr_process(&*conn, &data.stag, data.sid, data.rid);
+    match rec_tag {
+        Some(t) => Ok(Json(t)),
+        None => Err(BadRequest(None)),
     }
+}
+
+// TODO: Spawn off trace in separate thread and return polling id
+#[post("/trace", format = "json", data = "<data>")]
+fn trace(conn: DbConn, data: Json<TraceRequestData>) -> Result<Json<Vec<u32>>, BadRequest<String>> {
+    let data = data.into_inner();
+    let tr = svr_trace(&*conn, &data.m.as_bytes(), &data.tmd, data.uid);
+    Ok(Json(tr))
 }
 
 fn main() {
     rocket::ignite()
         .attach(DbConn::fairing())
-        .mount("/", routes![index, get_key])
+        .mount("/", routes![process, trace])
         .launch();
 }

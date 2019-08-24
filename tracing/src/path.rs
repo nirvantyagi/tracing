@@ -1,15 +1,19 @@
 use super::*;
 use redis::Commands;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct TraceMetadata {
     ptr: [u8; 16],
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct SenderTraceTag {
     addr: [u8; 32],
     ct: [u8; 16],
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct RecTraceTag {
     addr: [u8; 32],
 }
@@ -248,7 +252,9 @@ mod tests {
     fn bench_tag_receive(b: &mut Bencher) {
         let m = [0u8; 256];
         let k = rand::random::<[u8; 16]>();
-        let ttr = RecTraceTag { addr: crprf(&k, &m) };
+        let ttr = RecTraceTag {
+            addr: crprf(&k, &m),
+        };
         b.iter(|| verify_tag(&k, &m, &ttr));
     }
 
@@ -278,5 +284,4 @@ mod tests {
         b.iter(|| svr_trace(&conn, &m, &tmd, len));
         let _: () = redis::cmd("FLUSHDB").query(&conn).unwrap();
     }
-
 }
